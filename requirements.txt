@@ -1,0 +1,4 @@
+requests>=2.31.0
+zenpy>=2.0.25
+python-dateutil>=2.8.2
+typing-extensions>=4.8.0 
