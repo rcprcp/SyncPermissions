@@ -43,6 +43,7 @@ def main():
         # Set up command line argument parsing
         parser = argparse.ArgumentParser(description='Sync Quay.io permissions with Zendesk organizations')
         parser.add_argument('--input', required=True, help='Input file containing repository names')
+        parser.add_argument('--org-code', help='10-character organization code to process (optional)')
         args = parser.parse_args()
 
         # Read repository names from file into a map
@@ -52,41 +53,67 @@ def main():
         sync = PermissionSync()
         sync._setup_connections()
         
-        # Get and display all organizations
-        logger.info("Fetching all Zendesk organizations...")
-        organizations = sync.get_zendesk_organizations()
-        
-        # Track organizations with missing or invalid quay_io_team_id
-        for org in organizations:
-            # Check for quay_io_team_id
-            team_id = org.get('organization_fields', {}).get('quay_io_team_id')
-            if not team_id:
-                logger.info(f"Organization: {org['name']} (No Quay.io Team ID)")
-            else:
-                logger.info(f"Organization: {org['name']} Quay.io Team ID: {team_id}")
-                try:
-                    # Get and display Quay.io team permissions for this organization
-                    team_repos = sync.get_quay_teams('dremio', team_id)  # Pass the team ID
-                    if team_repos is None:
-                        print(f"Failed to fetch team permissions for team ID: {team_id}")
+        if args.org_code:
+            # Process single organization directly without Zendesk lookup
+            logger.info(f"Processing team ID: {args.org_code}")
+            try:
+                # Get and display Quay.io team permissions for this organization
+                team_repos = sync.get_quay_teams('dremio', args.org_code)
+                if team_repos is None:
+                    logger.error(f"Failed to fetch team permissions for team ID: {args.org_code}")
+                    sys.exit(1)
+                elif not team_repos:
+                    logger.info(f"No repositories found for team ID: {args.org_code}")
+                else:
+                    logger.info(f"\nRepositories for team ID: {args.org_code}:")
+                    for repo in team_repos:
+                        if repo in repo_map:
+                            logger.info(f"  - {repo} (in target list)")
+                        else:
+                            logger.info(f"  - {repo} (not in target list)")
+                    
+                    # Create missing repositories
+                    sync.create_repos(repo_map, team_repos, 'dremio', args.org_code)
+                    
+            except Exception as e:
+                logger.error(f"Error processing team ID {args.org_code}: {str(e)}\n{traceback.format_exc()}")
+                sys.exit(1)
+        else:
+            # Process all organizations
+            logger.info("Fetching all Zendesk organizations...")
+            organizations = sync.get_zendesk_organizations()
+            
+            # Track organizations with missing or invalid quay_io_team_id
+            for org in organizations:
+                # Check for quay_io_team_id
+                team_id = org.get('organization_fields', {}).get('quay_io_team_id')
+                if not team_id:
+                    logger.info(f"Organization: {org['name']} (No Quay.io Team ID)")
+                else:
+                    logger.info(f"Organization: {org['name']} Quay.io Team ID: {team_id}")
+                    try:
+                        # Get and display Quay.io team permissions for this organization
+                        team_repos = sync.get_quay_teams('dremio', team_id)  # Pass the team ID
+                        if team_repos is None:
+                            print(f"Failed to fetch team permissions for team ID: {team_id}")
+                            continue  # Skip to next organization
+                        elif not team_repos:
+                            print(f"No repositories found for team ID: {team_id}")
+                            continue  # Skip to next organization
+                        else:
+                            print(f"\nRepositories for {org['name']} (Team ID: {team_id}):")
+                            for repo in team_repos:
+                                if repo in repo_map:
+                                    print(f"  - {repo} (in target list)")
+                                else:
+                                    print(f"  - {repo} (not in target list)")
+                            
+                            # Create missing repositories
+                            sync.create_repos(repo_map, team_repos, 'dremio', team_id)
+                            
+                    except Exception as e:
+                        print(f"Error processing team ID {team_id}: {str(e)}")
                         continue  # Skip to next organization
-                    elif not team_repos:
-                        print(f"No repositories found for team ID: {team_id}")
-                        continue  # Skip to next organization
-                    else:
-                        print(f"\nRepositories for {org['name']} (Team ID: {team_id}):")
-                        for repo in team_repos:
-                            if repo in repo_map:
-                                print(f"  - {repo} (in target list)")
-                            else:
-                                print(f"  - {repo} (not in target list)")
-                        
-                        # Create missing repositories
-                        sync.create_repos(repo_map, team_repos, 'dremio', team_id)
-                        
-                except Exception as e:
-                    print(f"Error processing team ID {team_id}: {str(e)}")
-                    continue  # Skip to next organization
         
     except Exception as e:
         logger.error(f"Error in main: {str(e)}\n{traceback.format_exc()}")
@@ -269,8 +296,6 @@ class PermissionSync:
                         else:
                             print(f"    ✗ Failed to add {repo_path} to team {team_id}: {response.text}")
                         
-                        exit(1)
-                    
                     except requests.exceptions.RequestException as e:
                         print(f"    ✗ Error adding {repo_path} to team {team_id}: {str(e)}")
                         continue
