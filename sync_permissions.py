@@ -44,7 +44,12 @@ def main():
         parser = argparse.ArgumentParser(description='Sync Quay.io permissions with Zendesk organizations')
         parser.add_argument('--input', required=True, help='Input file containing repository names')
         parser.add_argument('--org-code', help='10-character organization code to process (optional)')
+        parser.add_argument('--remove', action='store_true', help='Remove repositories from team instead of adding them')
+        parser.add_argument('--dry-run', action='store_true', help='Show what would be done without making changes')
         args = parser.parse_args()
+
+        if args.dry_run:
+            logger.info("DRY RUN MODE: No changes will be made to repositories")
 
         # Read repository names from file into a map
         repo_map = read_repo_file(args.input)
@@ -72,12 +77,17 @@ def main():
                         else:
                             logger.info(f"  - {repo} (not in target list)")
                     
-                    # Create missing repositories
-                    sync.create_repos(repo_map, team_repos, 'dremio', args.org_code)
+                    if args.remove:
+                        # Remove repositories from team
+                        sync.remove_repos(repo_map, team_repos, 'dremio', args.org_code, args.dry_run)
+                    else:
+                        # Create missing repositories
+                        sync.create_repos(repo_map, team_repos, 'dremio', args.org_code, args.dry_run)
                     
             except Exception as e:
                 logger.error(f"Error processing team ID {args.org_code}: {str(e)}\n{traceback.format_exc()}")
                 sys.exit(1)
+
         else:
             # Process all organizations
             logger.info("Fetching all Zendesk organizations...")
@@ -87,6 +97,12 @@ def main():
             for org in organizations:
                 # Check for quay_io_team_id
                 team_id = org.get('organization_fields', {}).get('quay_io_team_id')
+                
+                #TODO remove debugging code for Nutanix
+                if team_id == 'esviocuncv':
+                    logger.info(f"DEBUGGING: skip {team_id}")
+                    continue;
+                
                 if not team_id:
                     logger.info(f"Organization: {org['name']} (No Quay.io Team ID)")
                 else:
@@ -108,13 +124,17 @@ def main():
                                 else:
                                     print(f"  - {repo} (not in target list)")
                             
-                            # Create missing repositories
-                            sync.create_repos(repo_map, team_repos, 'dremio', team_id)
+                            if args.remove:
+                                # Remove repositories from team
+                                sync.remove_repos(repo_map, team_repos, 'dremio', team_id, args.dry_run)
+                            else:
+                                # Create missing repositories
+                                sync.create_repos(repo_map, team_repos, 'dremio', team_id, args.dry_run)
                             
                     except Exception as e:
                         print(f"Error processing team ID {team_id}: {str(e)}")
-                        continue  # Skip to next organization
-        
+                        continue  
+                
     except Exception as e:
         logger.error(f"Error in main: {str(e)}\n{traceback.format_exc()}")
         sys.exit(1)
@@ -246,7 +266,7 @@ class PermissionSync:
                 self.logger.error(f"Error fetching Quay.io team permissions: {str(e)}\n{traceback.format_exc()}")
             return None
 
-    def create_repos(self, target_repos: Dict[str, bool], team_repos: List[str], org_name: str, team_id: str) -> None:
+    def create_repos(self, target_repos: Dict[str, bool], team_repos: List[str], org_name: str, team_id: str, dry_run: bool = False) -> None:
         """
         Compare target repositories with team repositories and create missing ones.
         
@@ -255,6 +275,7 @@ class PermissionSync:
             team_repos (List[str]): List of repositories the team currently has access to
             org_name (str): The Quay.io organization name
             team_id (str): The Quay.io team ID
+            dry_run (bool): If True, only show what would be done without making changes
         """
         try:
             # Convert team_repos to a set for faster lookup
@@ -267,6 +288,10 @@ class PermissionSync:
                 print(f"\nRepositories to create for team {team_id}:")
                 for repo in repos_to_create:
                     print(f"  - {repo}")
+                    
+                    if dry_run:
+                        print(f"    [DRY RUN] Would add {org_name}/{repo} to team {team_id}")
+                        continue
                     
                     # Prepare the request to add repository permissions
                     base_url = self.quay_client['base_url']
@@ -285,12 +310,9 @@ class PermissionSync:
                     
                     try:
                         # Add repository permissions to the team
-                        response = requests.put(
-                            f'{base_url}{permissions_endpoint}',
-                            headers=headers,
-                            json=payload
-                        )
+                        response = requests.put(f'{base_url}{permissions_endpoint}',headers=headers,json=payload)
                         
+                        # 200 from adding repo
                         if response.status_code == 200:
                             print(f"    ✓ Successfully added {repo_path} to team {team_id}")
                         else:
@@ -302,6 +324,61 @@ class PermissionSync:
                         
         except Exception as e:
             self.logger.error(f"Error in create_repos: {str(e)}\n{traceback.format_exc()}")
+            raise
+
+    def remove_repos(self, target_repos: Dict[str, bool], team_repos: List[str], org_name: str, team_id: str, dry_run: bool = False) -> None:
+        """
+        Remove repositories from a team's permissions.
+        
+        Args:
+            target_repos (Dict[str, bool]): Dictionary of target repository names
+            team_repos (List[str]): List of repositories the team currently has access to
+            org_name (str): The Quay.io organization name
+            team_id (str): The Quay.io team ID
+            dry_run (bool): If True, only show what would be done without making changes
+        """
+        try:
+            # Find repositories that need to be removed (those in both target_repos and team_repos)
+            repos_to_remove = [repo for repo in target_repos.keys() if repo in team_repos]
+            
+            if repos_to_remove:
+                logger.info(f"\nRepositories to remove from team {team_id}:")
+                for repo in repos_to_remove:
+                    logger.info(f"  - {repo}")
+                    
+                    if dry_run:
+                        logger.info(f"    [DRY RUN] Would remove {org_name}/{repo} from team {team_id}")
+                        continue
+                    
+                    # Prepare the request to remove repository permissions
+                    base_url = self.quay_client['base_url']
+                    repo_path = f"{org_name}/{repo}"
+                    permissions_endpoint = f'/repository/{repo_path}/permissions/team/{team_id}'
+                    
+                    headers = {
+                        'Authorization': f'Bearer {self.quay_client["token"]}',
+                        'Content-Type': 'application/json'
+                    }
+                    
+                    try:
+                        # Remove repository permissions from the team
+                        response = requests.delete(
+                            f'{base_url}{permissions_endpoint}',
+                            headers=headers
+                        )
+                        
+                        # 204 from removing repo
+                        if response.status_code == 204:
+                            logger.info(f"    ✓ Successfully removed {repo_path} from team {team_id}: {response.status_code}")
+                        else:
+                            logger.error(f"    ✗ Failed to remove {repo_path} from team {team_id}: {response.status_code}")
+                        
+                    except requests.exceptions.RequestException as e:
+                        logger.error(f"    ✗ Error removing {repo_path} from team {team_id}: {str(e)}")
+                        continue
+                        
+        except Exception as e:
+            logger.error(f"Error in remove_repos: {str(e)}\n{traceback.format_exc()}")
             raise
 
 if __name__ == "__main__":
